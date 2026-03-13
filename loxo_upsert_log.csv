@@ -12,11 +12,11 @@ UPDATE,14786372,Jy Won,linkedin,linkedin.com/in/jy-won-456b62285,won.jy@airs-med
 UPDATE,14786373,Ashley Guidace,linkedin,linkedin.com/in/ashleyguidace,ashley.guidace@airsmed.com,
 UPDATE,14786374,Jungsik Kim,linkedin,linkedin.com/in/jungsik-kim-20322a261,kim.jungsik@airsmed.com,
 UPDATE,14786375,Yeji Sung,linkedin,linkedin.com/in/yejisung,sung.yeji@airsmed.com,
-CREATE,14842473,Ryan Jeon,email_blocked_company_like,,jeon.minhyeok@airsmed.com,
+CREATE_AFTER_404,14843886,Ryan Jeon,stale_sqlite_id,linkedin.com/in/rjeon8,jeon.minhyeok@airsmed.com,Old person_id not found in Loxo; recreated.
 UPDATE,2524813,Christian To,linkedin,linkedin.com/in/christian2to,christian.to@airsmed.com,
 UPDATE,14786378,Stephen Mancuso,linkedin,linkedin.com/in/stephen-mancuso-5b715874,mancuso.stephen@airs-medical.com,
-CREATE,14842474,Kevin Yang,email_blocked_company_like,,kevin.yang@airsmed.com,
-UPDATE,14786380,Jaeyeon Yoon,linkedin,linkedin.com/in/jaeyeon-yoon-80b153234,yoon.jaeyeon@airsmed.com,
+CREATE_AFTER_404,14843887,Kevin Yang,stale_sqlite_id,linkedin.com/in/seungwook-yang-884b569a,kevin.yang@airsmed.com,Old person_id not found in Loxo; recreated.
+ERROR,14786380,Jaeyeon Yoon,linkedin,linkedin.com/in/jaeyeon-yoon-80b153234,yoon.jaeyeon@airsmed.com,"UPDATE /people/14786380 failed 429: {""error"":""Rate limit exceeded""}"
 UPDATE,14786381,Jason Park,linkedin,linkedin.com/in/acwaabe3g_4bk_ekjyl6zcz5_kvfyokcddjarxi,park.jangsoon@airsmed.com,
 UPDATE,14786382,Taehyun Hwang,linkedin,linkedin.com/in/taehyun-hwang-876631201,hwang.taehyun@airsmed.com,
 UPDATE,14786383,Sangoh Park,linkedin,linkedin.com/in/sangoh-park-469640318,park.sangoh@airsmed.com,
@@ -25,3 +25,4 @@ UPDATE,6770910,Moritz Braig,linkedin,linkedin.com/in/moritzbraig,moritz.braig@ai
 UPDATE,14786386,Andi Chin,linkedin,linkedin.com/in/andi-chin-863651111,andi.chin@airsmed.com,
 UPDATE,14786387,Michael Fabian,linkedin,linkedin.com/in/michael-fabian-03609320,michael.fabian@airsmed.com,
 UPDATE,14842436,manley corey,linkedin,linkedin.com/in/corey-manley-23609343,corey@xyz.com,
+UPDATE,14843814,Jane Doe,linkedin,linkedin.com/in/jane-doe-23609450,janedoe@xyz.com,
