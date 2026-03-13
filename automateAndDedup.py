@@ -336,20 +336,24 @@ class LoxoClient:
             return data["person"]
         return data if isinstance(data, dict) else {}
 
-def parse_person_id_from_response(resp: Dict[str, Any]) -> Optional[int]:
-    # Loxo often returns {"person": {"id": ...}, "errors": []} or {"id": ...}
+def parse_person_id_from_response(resp):
     if not isinstance(resp, dict):
         return None
-    if isinstance(resp.get("person"), dict) and resp["person"].get("id") is not None:
-        try:
-            return int(resp["person"]["id"])
-        except Exception:
-            return None
-    if resp.get("id") is not None:
-        try:
-            return int(resp["id"])
-        except Exception:
-            return None
+
+    if isinstance(resp.get("person"), dict):
+        pid = resp["person"].get("id")
+        if pid is not None:
+            return int(pid)
+
+    pid = resp.get("id")
+    if pid is not None:
+        return int(pid)
+
+    if isinstance(resp.get("data"), dict):
+        pid = resp["data"].get("id")
+        if pid is not None:
+            return int(pid)
+
     return None
 
 # ---------------------------
