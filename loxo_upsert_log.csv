@@ -1,28 +1,28 @@
 action,person_id,name,match,linkedin_norm,email,detail
-UPDATE,14786363,HyeonJu Oh,linkedin,linkedin.com/in/helenhyeonjuoh,,DRY_RUN
-UPDATE,2561417,Jina Park,linkedin,linkedin.com/in/jinapark89,jina.park@airsmed.com,DRY_RUN
-UPDATE,14786365,Woojin Jung,linkedin,linkedin.com/in/woojin-jung-6261021a6,jung.woojin@airsmed.com,DRY_RUN
-UPDATE,14786366,Hyeseong Lee,linkedin,linkedin.com/in/hyeseonglee-airsmedical,hye-seong.lee@airs-medical.com,DRY_RUN
-UPDATE,14786367,Lety Jimenez,linkedin,linkedin.com/in/letyjimenez,lety.jimenez@airsmed.com,DRY_RUN
-UPDATE,14786368,Mia Heo,linkedin,linkedin.com/in/mia-heo-095265155,heo.mia@airsmed.com,DRY_RUN
-UPDATE,2378628,Joanna Kwon,linkedin,linkedin.com/in/joanna-bomi-kwon,kwon.joanna@airsmed.com,DRY_RUN
-UPDATE,14786370,Yunmyeong Kim,linkedin,linkedin.com/in/yunmyeong-kim-11a47ba8,kim.yunmyeong@airs-medical.com,DRY_RUN
-UPDATE,14786371,Jayden Jung,linkedin,linkedin.com/in/jayden-joonghwan-jung-46131824,jung.joonghwan@airsmed.com,DRY_RUN
-UPDATE,14786372,Jy Won,linkedin,linkedin.com/in/jy-won-456b62285,won.jy@airs-medical.com,DRY_RUN
-UPDATE,14786373,Ashley Guidace,linkedin,linkedin.com/in/ashleyguidace,ashley.guidace@airsmed.com,DRY_RUN
-UPDATE,14786374,Jungsik Kim,linkedin,linkedin.com/in/jungsik-kim-20322a261,kim.jungsik@airsmed.com,DRY_RUN
-UPDATE,14786375,Yeji Sung,linkedin,linkedin.com/in/yejisung,sung.yeji@airsmed.com,DRY_RUN
-UPDATE,14842510,Ryan Jeon,linkedin,linkedin.com/in/rjeon8,jeon.minhyeok@airsmed.com,DRY_RUN
-UPDATE,2524813,Christian To,linkedin,linkedin.com/in/christian2to,christian.to@airsmed.com,DRY_RUN
-UPDATE,14786378,Stephen Mancuso,linkedin,linkedin.com/in/stephen-mancuso-5b715874,mancuso.stephen@airs-medical.com,DRY_RUN
-UPDATE,14842511,Kevin Yang,linkedin,linkedin.com/in/seungwook-yang-884b569a,kevin.yang@airsmed.com,DRY_RUN
-UPDATE,14786380,Jaeyeon Yoon,linkedin,linkedin.com/in/jaeyeon-yoon-80b153234,yoon.jaeyeon@airsmed.com,DRY_RUN
-UPDATE,14786381,Jason Park,linkedin,linkedin.com/in/acwaabe3g_4bk_ekjyl6zcz5_kvfyokcddjarxi,park.jangsoon@airsmed.com,DRY_RUN
-UPDATE,14786382,Taehyun Hwang,linkedin,linkedin.com/in/taehyun-hwang-876631201,hwang.taehyun@airsmed.com,DRY_RUN
-UPDATE,14786383,Sangoh Park,linkedin,linkedin.com/in/sangoh-park-469640318,park.sangoh@airsmed.com,DRY_RUN
-UPDATE,14786384,Lee Sunghwan,linkedin,linkedin.com/in/sunghwan-lee-b6774a1a9,lee.sunghwan@airsmed.com,DRY_RUN
-UPDATE,6770910,Moritz Braig,linkedin,linkedin.com/in/moritzbraig,moritz.braig@airsmed.com,DRY_RUN
-UPDATE,14786386,Andi Chin,linkedin,linkedin.com/in/andi-chin-863651111,andi.chin@airsmed.com,DRY_RUN
-UPDATE,14786387,Michael Fabian,linkedin,linkedin.com/in/michael-fabian-03609320,michael.fabian@airsmed.com,DRY_RUN
-UPDATE,14842436,manley corey,linkedin,linkedin.com/in/corey-manley-23609343,corey@xyz.com,DRY_RUN
-CREATE,,Jane Doe,email_blocked_company_like,linkedin.com/in/jane-doe-23609450,janedoe@xyz.com,DRY_RUN
+UPDATE,14786363,HyeonJu Oh,linkedin,linkedin.com/in/helenhyeonjuoh,,
+UPDATE,2561417,Jina Park,linkedin,linkedin.com/in/jinapark89,jina.park@airsmed.com,
+UPDATE,14786365,Woojin Jung,linkedin,linkedin.com/in/woojin-jung-6261021a6,jung.woojin@airsmed.com,
+UPDATE,14786366,Hyeseong Lee,linkedin,linkedin.com/in/hyeseonglee-airsmedical,hye-seong.lee@airs-medical.com,
+UPDATE,14786367,Lety Jimenez,linkedin,linkedin.com/in/letyjimenez,lety.jimenez@airsmed.com,
+UPDATE,14786368,Mia Heo,linkedin,linkedin.com/in/mia-heo-095265155,heo.mia@airsmed.com,
+UPDATE,2378628,Joanna Kwon,linkedin,linkedin.com/in/joanna-bomi-kwon,kwon.joanna@airsmed.com,
+UPDATE,14786370,Yunmyeong Kim,linkedin,linkedin.com/in/yunmyeong-kim-11a47ba8,kim.yunmyeong@airs-medical.com,
+UPDATE,14786371,Jayden Jung,linkedin,linkedin.com/in/jayden-joonghwan-jung-46131824,jung.joonghwan@airsmed.com,
+UPDATE,14786372,Jy Won,linkedin,linkedin.com/in/jy-won-456b62285,won.jy@airs-medical.com,
+UPDATE,14786373,Ashley Guidace,linkedin,linkedin.com/in/ashleyguidace,ashley.guidace@airsmed.com,
+UPDATE,14786374,Jungsik Kim,linkedin,linkedin.com/in/jungsik-kim-20322a261,kim.jungsik@airsmed.com,
+UPDATE,14786375,Yeji Sung,linkedin,linkedin.com/in/yejisung,sung.yeji@airsmed.com,
+CREATE_AFTER_404,14843886,Ryan Jeon,stale_sqlite_id,linkedin.com/in/rjeon8,jeon.minhyeok@airsmed.com,Old person_id not found in Loxo; recreated.
+UPDATE,2524813,Christian To,linkedin,linkedin.com/in/christian2to,christian.to@airsmed.com,
+UPDATE,14786378,Stephen Mancuso,linkedin,linkedin.com/in/stephen-mancuso-5b715874,mancuso.stephen@airs-medical.com,
+CREATE_AFTER_404,14843887,Kevin Yang,stale_sqlite_id,linkedin.com/in/seungwook-yang-884b569a,kevin.yang@airsmed.com,Old person_id not found in Loxo; recreated.
+ERROR,14786380,Jaeyeon Yoon,linkedin,linkedin.com/in/jaeyeon-yoon-80b153234,yoon.jaeyeon@airsmed.com,"UPDATE /people/14786380 failed 429: {""error"":""Rate limit exceeded""}"
+UPDATE,14786381,Jason Park,linkedin,linkedin.com/in/acwaabe3g_4bk_ekjyl6zcz5_kvfyokcddjarxi,park.jangsoon@airsmed.com,
+UPDATE,14786382,Taehyun Hwang,linkedin,linkedin.com/in/taehyun-hwang-876631201,hwang.taehyun@airsmed.com,
+UPDATE,14786383,Sangoh Park,linkedin,linkedin.com/in/sangoh-park-469640318,park.sangoh@airsmed.com,
+UPDATE,14786384,Lee Sunghwan,linkedin,linkedin.com/in/sunghwan-lee-b6774a1a9,lee.sunghwan@airsmed.com,
+UPDATE,6770910,Moritz Braig,linkedin,linkedin.com/in/moritzbraig,moritz.braig@airsmed.com,
+UPDATE,14786386,Andi Chin,linkedin,linkedin.com/in/andi-chin-863651111,andi.chin@airsmed.com,
+UPDATE,14786387,Michael Fabian,linkedin,linkedin.com/in/michael-fabian-03609320,michael.fabian@airsmed.com,
+UPDATE,14842436,manley corey,linkedin,linkedin.com/in/corey-manley-23609343,corey@xyz.com,
+UPDATE,14843814,Jane Doe,linkedin,linkedin.com/in/jane-doe-23609450,janedoe@xyz.com,

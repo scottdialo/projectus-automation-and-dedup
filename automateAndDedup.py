@@ -7,43 +7,6 @@ Key idea:
 - Build it once from a Loxo CSV export (fast) or any backfill method.
 - Keep it updated via Loxo webhooks (person create/update/destroy).
 - During imports, check SQLite for duplicates instantly; only call Loxo for creates/updates.
-
-Commands:
-1) Initialize DB:
-   python automateAndDedup.py init-db --db loxo_index.sqlite
-
-2) Backfill from Loxo CSV export (recommended):
-   python automateAndDedup.py backfill-csv --db loxo_index.sqlite --csv /path/loxo_people_export.csv \
-       --id-col "ID" --linkedin-col "LinkedIn" --email-col "Email"
-
-   (You must map the column names to your export. Run with --list-cols to see them.)
-
-3) Run importer (no full fetch):
-   export LOXO_API_TOKEN="..."
-   python automateAndDedup.py import \
-       --input "/path/sampleUsers.xlsx" \
-       --agency-slug "projectus-consulting-ltd" \
-       --db loxo_index.sqlite \
-       --dry-run
-
-4) Run webhook receiver to keep DB fresh:
-   export LOXO_API_TOKEN="..."
-   export LOXO_AGENCY_SLUG="projectus-consulting-ltd"
-   python automateAndDedup.py webhook-server --db loxo_index.sqlite --host 0.0.0.0 --port 8000
-
-   Then set Loxo webhook endpoint_url to:
-   https://YOUR_PUBLIC_DOMAIN/webhooks/loxo
-
-Env vars:
-- LOXO_API_TOKEN (required for import + webhook fetch)
-- LOXO_AGENCY_SLUG (required for webhook-server fetch)
-- LOXO_BASE_DOMAIN (optional, default app.loxo.co)
-- LOXO_WEBHOOK_SECRET (optional, if Loxo provides a secret for signature verification; otherwise signature is logged only)
-
-Notes:
-- LinkedIn is primary unique identifier.
-- Email fallback is allowed only if it's valid AND NOT company-like (per your rule).
-- Phone/email invalid errors won't stop the script: it retries create/update without those fields.
 """
 
 import argparse
@@ -81,7 +44,6 @@ REQUIRED_COLUMNS = [
     "Website",
 ]
 
-# Loxo form fields (matches your working examples)
 LOXO_FORM_MAPPING = {
     "Job Title": "person[title]",
     "Email Address": "person[email]",
@@ -90,6 +52,7 @@ LOXO_FORM_MAPPING = {
     "Country": "person[country]",
     "Company Name": "person[company]",
 }
+
 
 # ---------------------------
 # Cleaning / normalization
@@ -100,18 +63,27 @@ def norm_email(email: str) -> str:
         return ""
     return email.strip().lower()
 
+
 def clean_email(email: str) -> str:
     e = norm_email(email)
     return e if e and EMAIL_RE.match(e) else ""
 
+
 def norm_linkedin(url: str) -> str:
     if not isinstance(url, str):
         return ""
+
     u = url.strip().lower()
     u = re.sub(r"^https?://", "", u)
     u = re.sub(r"^www\.", "", u)
+
+    # Reject generic LinkedIn search URLs as invalid identifiers
+    if u.startswith("linkedin.com/search/"):
+        return ""
+
     u = u.split("?")[0].rstrip("/")
     return u
+
 
 def clean_phone(phone: str) -> str:
     if phone is None:
@@ -119,16 +91,19 @@ def clean_phone(phone: str) -> str:
     s = str(phone).strip()
     if not s:
         return ""
-    # Strip common extensions at end
+
     s = re.sub(r"(\bext\b|\bx\b|extension)\s*\.?\s*\d+$", "", s, flags=re.IGNORECASE).strip()
     has_plus = s.startswith("+")
     digits = re.sub(r"\D+", "", s)
-    # E.164 practical bounds
+
     if len(digits) < 7 or len(digits) > 15:
         return ""
+
     if has_plus or len(digits) > 10:
         return "+" + digits
+
     return digits
+
 
 def extract_domain(website: str) -> str:
     if not website:
@@ -144,10 +119,12 @@ def extract_domain(website: str) -> str:
         return ""
     return host.replace("www.", "").lower()
 
+
 def email_domain(email: str) -> str:
     if "@" not in email:
         return ""
     return email.split("@", 1)[1].lower()
+
 
 def normalize_company_tokens(company: str) -> Iterable[str]:
     if not isinstance(company, str):
@@ -156,15 +133,15 @@ def normalize_company_tokens(company: str) -> Iterable[str]:
     name = re.sub(r"[^a-z0-9]+", " ", name).strip()
     parts = [p for p in name.split() if p]
     stop = {
-        "inc","incorporated","llc","ltd","limited","corp","corporation",
-        "co","company","plc","gmbh","sa","sas","bv","ag","kg",
-        "group","holdings","holding","the"
+        "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
+        "co", "company", "plc", "gmbh", "sa", "sas", "bv", "ag", "kg",
+        "group", "holdings", "holding", "the"
     }
     toks = [p for p in parts if p not in stop and len(p) >= 3]
     collapsed = "".join(toks)
     if len(collapsed) >= 6:
         toks.append(collapsed)
-    # unique preserve order
+
     out, seen = [], set()
     for t in toks:
         if t not in seen:
@@ -172,20 +149,25 @@ def normalize_company_tokens(company: str) -> Iterable[str]:
             seen.add(t)
     return out
 
+
 def is_company_email(email: str, company: str, website: str) -> bool:
     ed = email_domain(email)
     if not ed:
         return False
+
     wd = extract_domain(website)
     if wd and ed == wd:
         return True
+
     for t in normalize_company_tokens(company):
         if t and t in ed:
             return True
+
     return False
 
+
 # ---------------------------
-# SQLite index (fast local lookup)
+# SQLite index
 # ---------------------------
 
 SCHEMA = """
@@ -199,6 +181,7 @@ CREATE TABLE IF NOT EXISTS people_index (
 CREATE INDEX IF NOT EXISTS idx_people_linkedin ON people_index(linkedin_norm);
 CREATE INDEX IF NOT EXISTS idx_people_email ON people_index(email_norm);
 """
+
 
 class IndexDB:
     def __init__(self, db_path: str):
@@ -251,6 +234,7 @@ class IndexDB:
         li = norm_linkedin(linkedin_url or "")
         if not li:
             return None
+
         con = self._connect()
         cur = con.cursor()
         cur.execute("SELECT person_id FROM people_index WHERE linkedin_norm=? LIMIT 1", (li,))
@@ -262,12 +246,14 @@ class IndexDB:
         em = norm_email(email or "")
         if not em:
             return None
+
         con = self._connect()
         cur = con.cursor()
         cur.execute("SELECT person_id FROM people_index WHERE email_norm=? LIMIT 1", (em,))
         row = cur.fetchone()
         con.close()
         return int(row[0]) if row else None
+
 
 # ---------------------------
 # Loxo API client
@@ -290,7 +276,6 @@ class LoxoClient:
     def create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         r = self.session.post(self.base_people, data=payload, timeout=60)
 
-        # retry without bad fields
         if r.status_code == 400 and r.text and ("Email is invalid" in r.text or "Phone is invalid" in r.text):
             payload2 = dict(payload)
             payload2.pop("person[email]", None)
@@ -324,7 +309,6 @@ class LoxoClient:
 
     def get_person(self, person_id: int) -> Dict[str, Any]:
         url = f"{self.base_people}/{person_id}"
-        # try minimal fields first; fallback if server rejects
         params = {"fields": "id,linkedin_url,email,email_address,updated_at"}
         r = self.session.get(url, params=params, timeout=60)
         if r.status_code >= 400:
@@ -335,6 +319,7 @@ class LoxoClient:
         if isinstance(data, dict) and isinstance(data.get("person"), dict):
             return data["person"]
         return data if isinstance(data, dict) else {}
+
 
 def parse_person_id_from_response(resp):
     if not isinstance(resp, dict):
@@ -356,6 +341,7 @@ def parse_person_id_from_response(resp):
 
     return None
 
+
 # ---------------------------
 # File loading + payload building
 # ---------------------------
@@ -365,10 +351,13 @@ def load_file(path: str) -> pd.DataFrame:
         df = pd.read_csv(path, dtype=str, keep_default_na=False)
     else:
         df = pd.read_excel(path, dtype=str).fillna("")
+
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise RuntimeError(f"Missing columns: {missing}\nFound: {list(df.columns)}")
+
     return df[REQUIRED_COLUMNS].copy()
+
 
 def build_payload(row: pd.Series) -> Tuple[Dict[str, Any], str, str]:
     first = str(row["First Name"]).strip()
@@ -393,7 +382,6 @@ def build_payload(row: pd.Series) -> Tuple[Dict[str, Any], str, str]:
     if raw_linkedin:
         payload["person[linkedin_url]"] = raw_linkedin
 
-    # Map remaining fields (skip empties)
     if str(row["Job Title"]).strip():
         payload["person[title]"] = str(row["Job Title"]).strip()
     if str(row["Country"]).strip():
@@ -403,12 +391,14 @@ def build_payload(row: pd.Series) -> Tuple[Dict[str, Any], str, str]:
 
     return payload, linkedin_norm, email
 
+
 # ---------------------------
 # Backfill from CSV export
 # ---------------------------
 
 def backfill_from_csv(db: IndexDB, csv_path: str, id_col: str, linkedin_col: str, email_col: str, list_cols: bool = False):
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+
     if list_cols:
         print("CSV columns:")
         for c in df.columns:
@@ -427,8 +417,9 @@ def backfill_from_csv(db: IndexDB, csv_path: str, id_col: str, linkedin_col: str
         pid_raw = str(r.get(id_col, "")).strip()
         if not pid_raw:
             continue
+
         try:
-            pid = int(float(pid_raw))  # handles "123.0" exports
+            pid = int(float(pid_raw))
         except Exception:
             continue
 
@@ -445,8 +436,9 @@ def backfill_from_csv(db: IndexDB, csv_path: str, id_col: str, linkedin_col: str
     rate = done / max(1e-9, (time.time() - t0))
     print(f"DONE backfill: {done} rows written ({rate:.1f}/s) into {db.db_path}")
 
+
 # ---------------------------
-# Import (no full fetch)
+# Import
 # ---------------------------
 
 def run_import(args):
@@ -459,16 +451,21 @@ def run_import(args):
 
     df = load_file(args.input)
 
-    created = updated = skipped = errors = 0
+    created = 0
+    updated = 0
+    skipped = 0
+    errors = 0
+
+    total_rows = len(df)
 
     with open(args.log, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["action","person_id","name","match","linkedin_norm","email","detail"],
+            fieldnames=["action", "person_id", "name", "match", "linkedin_norm", "email", "detail"],
         )
         writer.writeheader()
 
-        for _, row in df.iterrows():
+        for idx, (_, row) in enumerate(df.iterrows(), start=1):
             payload, linkedin_norm, email = build_payload(row)
             name = payload.get("person[name]", "")
 
@@ -478,13 +475,27 @@ def run_import(args):
             person_id: Optional[int] = None
             match = ""
 
-            # Primary match: linkedin via local DB
-            if linkedin_norm:
-                person_id = db.find_by_linkedin(row["LinkedIn Contact Profile URL"])
-                if person_id:
-                    match = "linkedin"
+            # HARD RULE: do not create if input file has no valid LinkedIn
+            if not linkedin_norm:
+                skipped += 1
+                writer.writerow({
+                    "action": "SKIP",
+                    "person_id": "",
+                    "name": name,
+                    "match": "missing_valid_linkedin",
+                    "linkedin_norm": linkedin_norm,
+                    "email": email,
+                    "detail": "Skipped because LinkedIn is missing or invalid in input file.",
+                })
+                print(f"[{idx}/{total_rows}] SKIP {name}")
+                continue
 
-            # Fallback: email via local DB only if allowed
+            # Primary match: LinkedIn
+            person_id = db.find_by_linkedin(row["LinkedIn Contact Profile URL"])
+            if person_id:
+                match = "linkedin"
+
+            # Optional fallback: email only if allowed
             if person_id is None and email:
                 if not is_company_email(email, company, website):
                     person_id = db.find_by_email(email)
@@ -492,20 +503,6 @@ def run_import(args):
                         match = "email_fallback"
                 else:
                     match = "email_blocked_company_like"
-
-            # If no reliable identifier, skip to avoid creating duplicates
-            if not linkedin_norm and not email:
-                skipped += 1
-                writer.writerow({
-                    "action": "SKIP",
-                    "person_id": "",
-                    "name": name,
-                    "match": "no_linkedin_no_email",
-                    "linkedin_norm": linkedin_norm,
-                    "email": email,
-                    "detail": "No identifiers",
-                })
-                continue
 
             try:
                 if args.dry_run:
@@ -520,7 +517,7 @@ def run_import(args):
                             "email": email,
                             "detail": "DRY_RUN",
                         })
-                        print("UPDATE", name)
+                        print(f"[{idx}/{total_rows}] UPDATE {name}")
                     else:
                         created += 1
                         writer.writerow({
@@ -532,28 +529,74 @@ def run_import(args):
                             "email": email,
                             "detail": "DRY_RUN",
                         })
-                        print("CREATE", name)
+                        print(f"[{idx}/{total_rows}] CREATE {name}")
                     continue
 
+                # Real run
                 if person_id:
-                    resp = client.update(person_id, payload)
-                    updated += 1
+                    print(f"[{idx}/{total_rows}] PROCESSING UPDATE {name} (person_id={person_id})")
+                    try:
+                        client.update(person_id, payload)
+                        updated += 1
 
-                    # keep local index fresh from your input row (fast)
-                    li_raw = payload.get("person[linkedin_url]", "")
-                    em_raw = payload.get("person[email]", "")
-                    db.upsert(person_id, li_raw, em_raw, updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                        li_raw = payload.get("person[linkedin_url]", "")
+                        em_raw = payload.get("person[email]", "")
+                        db.upsert(
+                            person_id,
+                            li_raw,
+                            em_raw,
+                            updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                        )
 
-                    writer.writerow({
-                        "action": "UPDATE",
-                        "person_id": person_id,
-                        "name": name,
-                        "match": match,
-                        "linkedin_norm": linkedin_norm,
-                        "email": email,
-                        "detail": "",
-                    })
+                        writer.writerow({
+                            "action": "UPDATE",
+                            "person_id": person_id,
+                            "name": name,
+                            "match": match,
+                            "linkedin_norm": linkedin_norm,
+                            "email": email,
+                            "detail": "",
+                        })
+                        print(f"[{idx}/{total_rows}] UPDATED {name}")
+                        time.sleep(0.2)
+
+                    except Exception as e:
+                        msg = str(e)
+                        if "404" in msg and "Person not found" in msg:
+                            print(f"[{idx}/{total_rows}] STALE ID for {name}, deleting local index row and recreating")
+                            db.delete(person_id)
+
+                            resp = client.create(payload)
+                            new_id = parse_person_id_from_response(resp)
+
+                            created += 1
+
+                            if new_id:
+                                li_raw = payload.get("person[linkedin_url]", "")
+                                em_raw = payload.get("person[email]", "")
+                                db.upsert(
+                                    new_id,
+                                    li_raw,
+                                    em_raw,
+                                    updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                                )
+
+                            writer.writerow({
+                                "action": "CREATE_AFTER_404",
+                                "person_id": new_id or "",
+                                "name": name,
+                                "match": "stale_sqlite_id",
+                                "linkedin_norm": linkedin_norm,
+                                "email": email,
+                                "detail": "Old person_id not found in Loxo; recreated.",
+                            })
+                            print(f"[{idx}/{total_rows}] RECREATED {name} (new person_id={new_id})")
+                            time.sleep(0.2)
+                        else:
+                            raise
+
                 else:
+                    print(f"[{idx}/{total_rows}] PROCESSING CREATE {name}")
                     resp = client.create(payload)
                     new_id = parse_person_id_from_response(resp)
                     created += 1
@@ -561,7 +604,12 @@ def run_import(args):
                     if new_id:
                         li_raw = payload.get("person[linkedin_url]", "")
                         em_raw = payload.get("person[email]", "")
-                        db.upsert(new_id, li_raw, em_raw, updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+                        db.upsert(
+                            new_id,
+                            li_raw,
+                            em_raw,
+                            updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                        )
 
                     writer.writerow({
                         "action": "CREATE",
@@ -572,7 +620,8 @@ def run_import(args):
                         "email": email,
                         "detail": "",
                     })
-                    print("CREATE RESPONSE:", resp)
+                    print(f"[{idx}/{total_rows}] CREATED {name} (person_id={new_id})")
+                    time.sleep(0.2)
 
             except Exception as e:
                 errors += 1
@@ -585,28 +634,22 @@ def run_import(args):
                     "email": email,
                     "detail": str(e)[:1500],
                 })
-                print("ERROR", name, "-", str(e)[:200])
+                print(f"[{idx}/{total_rows}] ERROR {name} - {str(e)[:200]}")
 
     print("DONE")
     print(f"Created: {created} | Updated: {updated} | Skipped: {skipped} | Errors: {errors}")
     print(f"Log: {args.log}")
     print(f"DB: {args.db}")
 
+
 # ---------------------------
-# Webhook server (keeps DB fresh)
+# Webhook server
 # ---------------------------
 
 def verify_signature_if_possible(payload_data: Dict[str, Any], secret: str) -> bool:
-    """
-    Loxo includes a 'signature' in payload_data.
-    Their docs snippet you shared doesn't specify signing algorithm/secret derivation.
-    If Loxo provides an explicit webhook secret, you can validate.
-
-    This function uses a conservative guess: HMAC-SHA256 over canonical JSON of data WITHOUT 'signature'.
-    If Loxo uses a different scheme, this will fail (so we keep it optional).
-    """
     if not secret:
         return True
+
     sig = str(payload_data.get("signature") or "")
     if not sig:
         return False
@@ -616,6 +659,7 @@ def verify_signature_if_possible(payload_data: Dict[str, Any], secret: str) -> b
     msg = json.dumps(data_copy, separators=(",", ":"), sort_keys=True).encode("utf-8")
     mac = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
     return hmac.compare_digest(mac, sig)
+
 
 def run_webhook_server(args):
     try:
@@ -651,9 +695,7 @@ def run_webhook_server(args):
         if not isinstance(data, dict):
             return Response(status_code=200, content="ok")
 
-        # Optional signature verification (only if you have a real secret)
         if secret and not verify_signature_if_possible(data, secret):
-            # Return 200 to avoid retry storms; log for investigation
             with open("loxo_webhook_bad_signature.log", "a", encoding="utf-8") as f:
                 f.write(raw.decode("utf-8", errors="replace") + "\n")
             return Response(status_code=200, content="ok")
@@ -662,7 +704,6 @@ def run_webhook_server(args):
         action = str(data.get("action") or "")
         item_id = data.get("item_id")
 
-        # Log all events
         with open("loxo_webhook_events.log", "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "data": data}) + "\n")
 
@@ -690,6 +731,7 @@ def run_webhook_server(args):
         return Response(status_code=200, content="ok")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
 
 # ---------------------------
 # CLI
@@ -742,6 +784,7 @@ def main():
     if args.cmd == "webhook-server":
         run_webhook_server(args)
         return
+
 
 if __name__ == "__main__":
     main()
