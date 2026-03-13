@@ -5,7 +5,7 @@ Fast Loxo import + dedupe without fetching all contacts every run.
 Key idea:
 - Maintain a local SQLite index of Loxo people keyed by linkedin_norm + email_norm.
 - Build it once from a Loxo CSV export (fast) or any backfill method.
-- Keep it updated via Loxo webhooks (person create/update/destroy).
+- Keep it updated via Loxo webhooks (person create/update.destroy).
 - During imports, check SQLite for duplicates instantly; only call Loxo for creates/updates.
 """
 
@@ -230,6 +230,16 @@ class IndexDB:
         con.commit()
         con.close()
 
+    def delete_by_linkedin(self, linkedin_url: str):
+        li = norm_linkedin(linkedin_url or "")
+        if not li:
+            return
+        con = self._connect()
+        cur = con.cursor()
+        cur.execute("DELETE FROM people_index WHERE linkedin_norm=?", (li,))
+        con.commit()
+        con.close()
+
     def find_by_linkedin(self, linkedin_url: str) -> Optional[int]:
         li = norm_linkedin(linkedin_url or "")
         if not li:
@@ -237,7 +247,13 @@ class IndexDB:
 
         con = self._connect()
         cur = con.cursor()
-        cur.execute("SELECT person_id FROM people_index WHERE linkedin_norm=? LIMIT 1", (li,))
+        cur.execute("""
+            SELECT person_id
+            FROM people_index
+            WHERE linkedin_norm=?
+            ORDER BY person_id DESC
+            LIMIT 1
+        """, (li,))
         row = cur.fetchone()
         con.close()
         return int(row[0]) if row else None
@@ -249,7 +265,13 @@ class IndexDB:
 
         con = self._connect()
         cur = con.cursor()
-        cur.execute("SELECT person_id FROM people_index WHERE email_norm=? LIMIT 1", (em,))
+        cur.execute("""
+            SELECT person_id
+            FROM people_index
+            WHERE email_norm=?
+            ORDER BY person_id DESC
+            LIMIT 1
+        """, (em,))
         row = cur.fetchone()
         con.close()
         return int(row[0]) if row else None
@@ -563,35 +585,21 @@ def run_import(args):
                     except Exception as e:
                         msg = str(e)
                         if "404" in msg and "Person not found" in msg:
-                            print(f"[{idx}/{total_rows}] STALE ID for {name}, deleting local index row and recreating")
-                            db.delete(person_id)
+                            print(f"[{idx}/{total_rows}] STALE ID for {name}, deleting all local rows for this LinkedIn and skipping")
+                            db.delete_by_linkedin(payload.get("person[linkedin_url]", ""))
 
-                            resp = client.create(payload)
-                            new_id = parse_person_id_from_response(resp)
-
-                            created += 1
-
-                            if new_id:
-                                li_raw = payload.get("person[linkedin_url]", "")
-                                em_raw = payload.get("person[email]", "")
-                                db.upsert(
-                                    new_id,
-                                    li_raw,
-                                    em_raw,
-                                    updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                                )
-
+                            skipped += 1
                             writer.writerow({
-                                "action": "CREATE_AFTER_404",
-                                "person_id": new_id or "",
+                                "action": "STALE_ID_SKIP",
+                                "person_id": person_id,
                                 "name": name,
-                                "match": "stale_sqlite_id",
+                                "match": "stale_sqlite_linkedin_group",
                                 "linkedin_norm": linkedin_norm,
                                 "email": email,
-                                "detail": "Old person_id not found in Loxo; recreated.",
+                                "detail": "Matched local ID no longer exists in Loxo. Removed local rows and skipped to avoid recreate loop.",
                             })
-                            print(f"[{idx}/{total_rows}] RECREATED {name} (new person_id={new_id})")
-                            time.sleep(0.2)
+                            print(f"[{idx}/{total_rows}] SKIPPED {name} after stale ID cleanup")
+                            continue
                         else:
                             raise
 
