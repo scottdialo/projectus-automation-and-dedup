@@ -42,6 +42,7 @@ REQUIRED_COLUMNS = [
     "Country",
     "Company Name",
     "Website",
+    "Therapy/Device",
 ]
 
 LOXO_FORM_MAPPING = {
@@ -51,6 +52,7 @@ LOXO_FORM_MAPPING = {
     "LinkedIn Contact Profile URL": "person[linkedin_url]",
     "Country": "person[country]",
     "Company Name": "person[company]",
+    "Therapy/Device": "person[custom_text_1]",
 }
 
 
@@ -331,7 +333,7 @@ class LoxoClient:
 
     def get_person(self, person_id: int) -> Dict[str, Any]:
         url = f"{self.base_people}/{person_id}"
-        params = {"fields": "id,linkedin_url,email,email_address,updated_at"}
+        params = {"fields": "id,linkedin_url,email,email_address,updated_at,custom_text_1"}
         r = self.session.get(url, params=params, timeout=60)
         if r.status_code >= 400:
             r = self.session.get(url, timeout=60)
@@ -410,6 +412,8 @@ def build_payload(row: pd.Series) -> Tuple[Dict[str, Any], str, str]:
         payload["person[country]"] = str(row["Country"]).strip()
     if str(row["Company Name"]).strip():
         payload["person[company]"] = str(row["Company Name"]).strip()
+    if str(row["Therapy/Device"]).strip():
+        payload["person[custom_text_1]"] = str(row["Therapy/Device"]).strip()
 
     return payload, linkedin_norm, email
 
