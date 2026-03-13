@@ -1,4 +1,4 @@
 action,person_id,name,match,linkedin_norm,email,detail
 UPDATE,14844642,Ella Tolmacheva,linkedin,linkedin.com/in/ella-tolmacheva-47512ab,ella.tolmacheva@swissimg.ch,
-STALE_ID_SKIP,14844643,Anthony Tang,stale_sqlite_linkedin_group,linkedin.com/in/anthony-tang-34468855,atang@canet-nce.ca,Matched local ID no longer exists in Loxo. Removed local rows and skipped to avoid recreate loop.
+CREATE,14844728,Anthony Tang,email_blocked_company_like,linkedin.com/in/anthony-tang-34468855,atang@canet-nce.ca,
 UPDATE,14844314,Chris Simon,linkedin,linkedin.com/in/christine-simon-mba-74484476,csimon@haemonetics.com,
