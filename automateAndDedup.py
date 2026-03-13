@@ -568,6 +568,7 @@ def run_import(args):
                         "email": email,
                         "detail": "",
                     })
+                    print("CREATE RESPONSE:", resp)
 
             except Exception as e:
                 errors += 1
