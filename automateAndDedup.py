@@ -1,74 +1,49 @@
 #!/usr/bin/env python3
 """
-Fast Loxo import + dedupe without fetching all contacts every run.
+Fast Loxo index builder for dedupe.
 
-Key idea:
-- Maintain a local SQLite index of Loxo people keyed by linkedin_norm + email_norm.
-- Build it once from a Loxo CSV export (fast) or any backfill method.
-- Keep it updated via Loxo webhooks (person create/update.destroy).
-- During imports, check SQLite for duplicates instantly; only call Loxo for creates/updates.
+Indexes:
+- LinkedIn
+- All Emails
+- All Phones
 """
 
 import argparse
-import csv
-import hashlib
-import hmac
-import json
 import os
 import re
 import sqlite3
-import sys
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Optional
 
 import pandas as pd
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
-REQUIRED_COLUMNS = [
-    "Last Name",
-    "First Name",
-    "Job Title",
-    "Department",
-    "Email Address",
-    "Mobile phone",
-    "LinkedIn Contact Profile URL",
-    "Country",
-    "Company Name",
-    "Website",
-    "Therapy/Device",
-]
-
-LOXO_FORM_MAPPING = {
-    "Job Title": "person[title]",
-    "Email Address": "person[email]",
-    "Mobile phone": "person[phone]",
-    "LinkedIn Contact Profile URL": "person[linkedin_url]",
-    "Country": "person[country]",
-    "Company Name": "person[company]",
-    "Therapy/Device": "person[custom_text_1]",
-}
-
 
 # ---------------------------
-# Cleaning / normalization
+# Cleaning
 # ---------------------------
 
 def norm_email(email: str) -> str:
     if not isinstance(email, str):
         return ""
-    return email.strip().lower()
+    e = email.strip().lower()
+    if not EMAIL_RE.match(e):
+        return ""
+    return e
 
 
-def clean_email(email: str) -> str:
-    e = norm_email(email)
-    return e if e and EMAIL_RE.match(e) else ""
+def clean_phone(phone: str) -> str:
+    if not isinstance(phone, str):
+        return ""
+
+    s = phone.strip()
+    s = re.sub(r"\D+", "", s)
+
+    if len(s) < 7:
+        return ""
+
+    return s
 
 
 def norm_linkedin(url: str) -> str:
@@ -76,673 +51,207 @@ def norm_linkedin(url: str) -> str:
         return ""
 
     u = url.strip().lower()
+
     u = re.sub(r"^https?://", "", u)
     u = re.sub(r"^www\.", "", u)
 
-    # Reject generic LinkedIn search URLs as invalid identifiers
-    if u.startswith("linkedin.com/search/"):
-        return ""
-
     u = u.split("?")[0].rstrip("/")
+
     return u
 
 
-def clean_phone(phone: str) -> str:
-    if phone is None:
-        return ""
-    s = str(phone).strip()
-    if not s:
-        return ""
-
-    s = re.sub(r"(\bext\b|\bx\b|extension)\s*\.?\s*\d+$", "", s, flags=re.IGNORECASE).strip()
-    has_plus = s.startswith("+")
-    digits = re.sub(r"\D+", "", s)
-
-    if len(digits) < 7 or len(digits) > 15:
-        return ""
-
-    if has_plus or len(digits) > 10:
-        return "+" + digits
-
-    return digits
-
-
-def extract_domain(website: str) -> str:
-    if not website:
-        return ""
-    w = website.strip()
-    if not w:
-        return ""
-    if not w.startswith("http"):
-        w = "https://" + w
-    try:
-        host = urlparse(w).hostname or ""
-    except Exception:
-        return ""
-    return host.replace("www.", "").lower()
-
-
-def email_domain(email: str) -> str:
-    if "@" not in email:
-        return ""
-    return email.split("@", 1)[1].lower()
-
-
-def normalize_company_tokens(company: str) -> Iterable[str]:
-    if not isinstance(company, str):
-        return []
-    name = company.lower()
-    name = re.sub(r"[^a-z0-9]+", " ", name).strip()
-    parts = [p for p in name.split() if p]
-    stop = {
-        "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
-        "co", "company", "plc", "gmbh", "sa", "sas", "bv", "ag", "kg",
-        "group", "holdings", "holding", "the"
-    }
-    toks = [p for p in parts if p not in stop and len(p) >= 3]
-    collapsed = "".join(toks)
-    if len(collapsed) >= 6:
-        toks.append(collapsed)
-
-    out, seen = [], set()
-    for t in toks:
-        if t not in seen:
-            out.append(t)
-            seen.add(t)
-    return out
-
-
-def is_company_email(email: str, company: str, website: str) -> bool:
-    ed = email_domain(email)
-    if not ed:
-        return False
-
-    wd = extract_domain(website)
-    if wd and ed == wd:
-        return True
-
-    for t in normalize_company_tokens(company):
-        if t and t in ed:
-            return True
-
-    return False
-
-
 # ---------------------------
-# SQLite index
+# SQLite
 # ---------------------------
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS people_index (
-  person_id     INTEGER PRIMARY KEY,
-  linkedin_norm TEXT,
-  email_norm    TEXT,
-  updated_at    TEXT
+    person_id INTEGER,
+    linkedin_norm TEXT,
+    email_norm TEXT,
+    phone_norm TEXT,
+    updated_at TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_people_id ON people_index(person_id);
 CREATE INDEX IF NOT EXISTS idx_people_linkedin ON people_index(linkedin_norm);
 CREATE INDEX IF NOT EXISTS idx_people_email ON people_index(email_norm);
+CREATE INDEX IF NOT EXISTS idx_people_phone ON people_index(phone_norm);
 """
 
 
 class IndexDB:
+
     def __init__(self, db_path: str):
+
         self.db_path = db_path
+
+        self.con = sqlite3.connect(self.db_path)
+
+        self.con.execute("PRAGMA journal_mode=WAL;")
+        self.con.execute("PRAGMA synchronous=NORMAL;")
+
         self._ensure()
 
-    def _connect(self):
-        con = sqlite3.connect(self.db_path)
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA synchronous=NORMAL;")
-        return con
-
     def _ensure(self):
-        con = self._connect()
-        cur = con.cursor()
-        for stmt in SCHEMA.strip().split(";"):
-            s = stmt.strip()
-            if s:
-                cur.execute(s)
-        con.commit()
-        con.close()
 
-    def upsert(self, person_id: int, linkedin_url: str, email: str, updated_at: str = ""):
-        li = norm_linkedin(linkedin_url or "")
-        em = norm_email(email or "")
-        con = self._connect()
-        cur = con.cursor()
+        cur = self.con.cursor()
+
+        cur.executescript(SCHEMA)
+
+        self.con.commit()
+
+    def insert(self, person_id, linkedin="", email="", phone=""):
+
+        li = norm_linkedin(linkedin)
+        em = norm_email(email)
+        ph = clean_phone(phone)
+
+        cur = self.con.cursor()
+
         cur.execute(
             """
-            INSERT INTO people_index(person_id, linkedin_norm, email_norm, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(person_id) DO UPDATE SET
-              linkedin_norm=excluded.linkedin_norm,
-              email_norm=excluded.email_norm,
-              updated_at=excluded.updated_at
+            INSERT INTO people_index
+            (person_id, linkedin_norm, email_norm, phone_norm, updated_at)
+            VALUES (?, ?, ?, ?, '')
             """,
-            (person_id, li or None, em or None, updated_at or None),
+            (person_id, li, em, ph),
         )
-        con.commit()
-        con.close()
 
-    def delete(self, person_id: int):
-        con = self._connect()
-        cur = con.cursor()
-        cur.execute("DELETE FROM people_index WHERE person_id=?", (person_id,))
-        con.commit()
-        con.close()
+    def bulk_commit(self):
+        self.con.commit()
 
-    def delete_by_linkedin(self, linkedin_url: str):
-        li = norm_linkedin(linkedin_url or "")
-        if not li:
-            return
-        con = self._connect()
-        cur = con.cursor()
-        cur.execute("DELETE FROM people_index WHERE linkedin_norm=?", (li,))
-        con.commit()
-        con.close()
+    def close(self):
+        self.con.close()
 
-    def find_by_linkedin(self, linkedin_url: str) -> Optional[int]:
-        li = norm_linkedin(linkedin_url or "")
+    def find_by_linkedin(self, linkedin) -> Optional[int]:
+
+        li = norm_linkedin(linkedin)
+
         if not li:
             return None
 
-        con = self._connect()
-        cur = con.cursor()
-        cur.execute("""
-            SELECT person_id
-            FROM people_index
-            WHERE linkedin_norm=?
-            ORDER BY person_id DESC
-            LIMIT 1
-        """, (li,))
-        row = cur.fetchone()
-        con.close()
-        return int(row[0]) if row else None
+        cur = self.con.cursor()
 
-    def find_by_email(self, email: str) -> Optional[int]:
-        em = norm_email(email or "")
+        cur.execute(
+            "SELECT person_id FROM people_index WHERE linkedin_norm=? LIMIT 1",
+            (li,),
+        )
+
+        r = cur.fetchone()
+
+        return r[0] if r else None
+
+    def find_by_email(self, email) -> Optional[int]:
+
+        em = norm_email(email)
+
         if not em:
             return None
 
-        con = self._connect()
-        cur = con.cursor()
-        cur.execute("""
-            SELECT person_id
-            FROM people_index
-            WHERE email_norm=?
-            ORDER BY person_id DESC
-            LIMIT 1
-        """, (em,))
-        row = cur.fetchone()
-        con.close()
-        return int(row[0]) if row else None
+        cur = self.con.cursor()
+
+        cur.execute(
+            "SELECT person_id FROM people_index WHERE email_norm=? LIMIT 1",
+            (em,),
+        )
+
+        r = cur.fetchone()
+
+        return r[0] if r else None
+
+    def find_by_phone(self, phone) -> Optional[int]:
+
+        ph = clean_phone(phone)
+
+        if not ph:
+            return None
+
+        cur = self.con.cursor()
+
+        cur.execute(
+            "SELECT person_id FROM people_index WHERE phone_norm=? LIMIT 1",
+            (ph,),
+        )
+
+        r = cur.fetchone()
+
+        return r[0] if r else None
 
 
 # ---------------------------
-# Loxo API client
+# Backfill
 # ---------------------------
 
-@dataclass
-class LoxoClient:
-    agency_slug: str
-    token: str
-    base_domain: str = "app.loxo.co"
+def backfill_from_csv(db: IndexDB, csv_path: str, id_col: str, linkedin_col: str, list_cols=False):
 
-    def __post_init__(self):
-        self.base_people = f"https://{self.base_domain}/api/{self.agency_slug}/people"
-        self.session = requests.Session()
-        self.session.headers.update({
-            "accept": "application/json",
-            "authorization": f"Bearer {self.token}",
-        })
-
-    def create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = self.session.post(self.base_people, data=payload, timeout=60)
-
-        if r.status_code == 400 and r.text and ("Email is invalid" in r.text or "Phone is invalid" in r.text):
-            payload2 = dict(payload)
-            payload2.pop("person[email]", None)
-            payload2.pop("person[phone]", None)
-            r = self.session.post(self.base_people, data=payload2, timeout=60)
-
-        if r.status_code >= 400:
-            raise RuntimeError(f"POST /people failed {r.status_code}: {r.text}")
-
-        return r.json() if r.content else {}
-
-    def update(self, person_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_people}/{person_id}"
-        r = self.session.patch(url, data=payload, timeout=60)
-
-        if r.status_code == 405:
-            r = self.session.put(url, data=payload, timeout=60)
-
-        if r.status_code == 400 and r.text and ("Email is invalid" in r.text or "Phone is invalid" in r.text):
-            payload2 = dict(payload)
-            payload2.pop("person[email]", None)
-            payload2.pop("person[phone]", None)
-            r = self.session.patch(url, data=payload2, timeout=60)
-            if r.status_code == 405:
-                r = self.session.put(url, data=payload2, timeout=60)
-
-        if r.status_code >= 400:
-            raise RuntimeError(f"UPDATE /people/{person_id} failed {r.status_code}: {r.text}")
-
-        return r.json() if r.content else {}
-
-    def get_person(self, person_id: int) -> Dict[str, Any]:
-        url = f"{self.base_people}/{person_id}"
-        params = {"fields": "id,linkedin_url,email,email_address,updated_at,custom_text_1"}
-        r = self.session.get(url, params=params, timeout=60)
-        if r.status_code >= 400:
-            r = self.session.get(url, timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError(f"GET /people/{person_id} failed {r.status_code}: {r.text}")
-        data = r.json() if r.content else {}
-        if isinstance(data, dict) and isinstance(data.get("person"), dict):
-            return data["person"]
-        return data if isinstance(data, dict) else {}
-
-
-def parse_person_id_from_response(resp):
-    if not isinstance(resp, dict):
-        return None
-
-    if isinstance(resp.get("person"), dict):
-        pid = resp["person"].get("id")
-        if pid is not None:
-            return int(pid)
-
-    pid = resp.get("id")
-    if pid is not None:
-        return int(pid)
-
-    if isinstance(resp.get("data"), dict):
-        pid = resp["data"].get("id")
-        if pid is not None:
-            return int(pid)
-
-    return None
-
-
-# ---------------------------
-# File loading + payload building
-# ---------------------------
-
-def load_file(path: str) -> pd.DataFrame:
-    if path.lower().endswith(".csv"):
-        df = pd.read_csv(path, dtype=str, keep_default_na=False)
-    else:
-        df = pd.read_excel(path, dtype=str).fillna("")
-
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"Missing columns: {missing}\nFound: {list(df.columns)}")
-
-    return df[REQUIRED_COLUMNS].copy()
-
-
-def build_payload(row: pd.Series) -> Tuple[Dict[str, Any], str, str]:
-    first = str(row["First Name"]).strip()
-    last = str(row["Last Name"]).strip()
-    name = (first + " " + last).strip()
-
-    raw_email = str(row["Email Address"]).strip()
-    raw_phone = str(row["Mobile phone"]).strip()
-    raw_linkedin = str(row["LinkedIn Contact Profile URL"]).strip()
-
-    email = clean_email(raw_email)
-    phone = clean_phone(raw_phone)
-    linkedin_norm = norm_linkedin(raw_linkedin)
-
-    payload: Dict[str, Any] = {}
-    if name:
-        payload["person[name]"] = name
-    if email:
-        payload["person[email]"] = email
-    if phone:
-        payload["person[phone]"] = phone
-    if raw_linkedin:
-        payload["person[linkedin_url]"] = raw_linkedin
-
-    if str(row["Job Title"]).strip():
-        payload["person[title]"] = str(row["Job Title"]).strip()
-    if str(row["Country"]).strip():
-        payload["person[country]"] = str(row["Country"]).strip()
-    if str(row["Company Name"]).strip():
-        payload["person[company]"] = str(row["Company Name"]).strip()
-    if str(row["Therapy/Device"]).strip():
-        payload["person[custom_text_1]"] = str(row["Therapy/Device"]).strip()
-
-    return payload, linkedin_norm, email
-
-
-# ---------------------------
-# Backfill from CSV export
-# ---------------------------
-
-def backfill_from_csv(db: IndexDB, csv_path: str, id_col: str, linkedin_col: str, email_col: str, list_cols: bool = False):
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
 
     if list_cols:
-        print("CSV columns:")
+        print("\nCSV columns:\n")
         for c in df.columns:
             print(" -", c)
         return
 
-    for col in (id_col, linkedin_col, email_col):
-        if col not in df.columns:
-            raise RuntimeError(f"Column '{col}' not found in CSV. Use --list-cols to inspect columns.")
-
     total = len(df)
-    t0 = time.time()
-    done = 0
+
+    start = time.time()
+
+    rows = 0
 
     for _, r in df.iterrows():
+
         pid_raw = str(r.get(id_col, "")).strip()
+
         if not pid_raw:
             continue
 
         try:
-            pid = int(float(pid_raw))
-        except Exception:
+            pid = int(pid_raw)
+        except:
             continue
 
-        li = str(r.get(linkedin_col, "")).strip()
-        em = str(r.get(email_col, "")).strip()
+        linkedin = r.get(linkedin_col, "")
 
-        db.upsert(pid, li, em, updated_at="")
+        emails = [
+            r.get("Email", ""),
+            r.get("Personal Email", ""),
+            r.get("Work Email", ""),
+        ]
 
-        done += 1
-        if done % 50000 == 0:
-            rate = done / max(1e-9, (time.time() - t0))
-            print(f"Backfilled {done}/{total} ({rate:.1f}/s)")
+        phones = [
+            r.get("Phone", ""),
+            r.get("Personal Phone", ""),
+            r.get("Work Phone", ""),
+        ]
 
-    rate = done / max(1e-9, (time.time() - t0))
-    print(f"DONE backfill: {done} rows written ({rate:.1f}/s) into {db.db_path}")
+        db.insert(pid, linkedin)
 
+        for e in emails:
 
-# ---------------------------
-# Import
-# ---------------------------
+            if e:
+                db.insert(pid, "", e)
 
-def run_import(args):
-    token = os.environ.get("LOXO_API_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("Set LOXO_API_TOKEN env var")
+        for p in phones:
 
-    db = IndexDB(args.db)
-    client = LoxoClient(args.agency_slug, token, base_domain=args.base_domain)
+            if p:
+                db.insert(pid, "", "", p)
 
-    df = load_file(args.input)
+        rows += 1
 
-    created = 0
-    updated = 0
-    skipped = 0
-    errors = 0
+        if rows % 10000 == 0:
 
-    total_rows = len(df)
+            db.bulk_commit()
 
-    with open(args.log, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["action", "person_id", "name", "match", "linkedin_norm", "email", "detail"],
-        )
-        writer.writeheader()
+            rate = rows / (time.time() - start)
 
-        for idx, (_, row) in enumerate(df.iterrows(), start=1):
-            payload, linkedin_norm, email = build_payload(row)
-            name = payload.get("person[name]", "")
+            print(f"Indexed {rows}/{total} ({rate:.0f}/sec)")
 
-            company = str(row["Company Name"]).strip()
-            website = str(row["Website"]).strip()
+    db.bulk_commit()
 
-            person_id: Optional[int] = None
-            match = ""
+    rate = rows / (time.time() - start)
 
-            # HARD RULE: do not create if input file has no valid LinkedIn
-            if not linkedin_norm:
-                skipped += 1
-                writer.writerow({
-                    "action": "SKIP",
-                    "person_id": "",
-                    "name": name,
-                    "match": "missing_valid_linkedin",
-                    "linkedin_norm": linkedin_norm,
-                    "email": email,
-                    "detail": "Skipped because LinkedIn is missing or invalid in input file.",
-                })
-                print(f"[{idx}/{total_rows}] SKIP {name}")
-                continue
-
-            # Primary match: LinkedIn
-            person_id = db.find_by_linkedin(row["LinkedIn Contact Profile URL"])
-            if person_id:
-                match = "linkedin"
-
-            # Optional fallback: email only if allowed
-            if person_id is None and email:
-                if not is_company_email(email, company, website):
-                    person_id = db.find_by_email(email)
-                    if person_id:
-                        match = "email_fallback"
-                else:
-                    match = "email_blocked_company_like"
-
-            try:
-                if args.dry_run:
-                    if person_id:
-                        updated += 1
-                        writer.writerow({
-                            "action": "UPDATE",
-                            "person_id": person_id,
-                            "name": name,
-                            "match": match,
-                            "linkedin_norm": linkedin_norm,
-                            "email": email,
-                            "detail": "DRY_RUN",
-                        })
-                        print(f"[{idx}/{total_rows}] UPDATE {name}")
-                    else:
-                        created += 1
-                        writer.writerow({
-                            "action": "CREATE",
-                            "person_id": "",
-                            "name": name,
-                            "match": match or "none",
-                            "linkedin_norm": linkedin_norm,
-                            "email": email,
-                            "detail": "DRY_RUN",
-                        })
-                        print(f"[{idx}/{total_rows}] CREATE {name}")
-                    continue
-
-                # Real run
-                if person_id:
-                    print(f"[{idx}/{total_rows}] PROCESSING UPDATE {name} (person_id={person_id})")
-                    try:
-                        client.update(person_id, payload)
-                        updated += 1
-
-                        li_raw = payload.get("person[linkedin_url]", "")
-                        em_raw = payload.get("person[email]", "")
-                        db.upsert(
-                            person_id,
-                            li_raw,
-                            em_raw,
-                            updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                        )
-
-                        writer.writerow({
-                            "action": "UPDATE",
-                            "person_id": person_id,
-                            "name": name,
-                            "match": match,
-                            "linkedin_norm": linkedin_norm,
-                            "email": email,
-                            "detail": "",
-                        })
-                        print(f"[{idx}/{total_rows}] UPDATED {name}")
-                        time.sleep(0.2)
-
-                    except Exception as e:
-                        msg = str(e)
-                        if "404" in msg and "Person not found" in msg:
-                            print(f"[{idx}/{total_rows}] STALE ID for {name}, deleting all local rows for this LinkedIn and skipping")
-                            db.delete_by_linkedin(payload.get("person[linkedin_url]", ""))
-
-                            skipped += 1
-                            writer.writerow({
-                                "action": "STALE_ID_SKIP",
-                                "person_id": person_id,
-                                "name": name,
-                                "match": "stale_sqlite_linkedin_group",
-                                "linkedin_norm": linkedin_norm,
-                                "email": email,
-                                "detail": "Matched local ID no longer exists in Loxo. Removed local rows and skipped to avoid recreate loop.",
-                            })
-                            print(f"[{idx}/{total_rows}] SKIPPED {name} after stale ID cleanup")
-                            continue
-                        else:
-                            raise
-
-                else:
-                    print(f"[{idx}/{total_rows}] PROCESSING CREATE {name}")
-                    resp = client.create(payload)
-                    new_id = parse_person_id_from_response(resp)
-                    created += 1
-
-                    if new_id:
-                        li_raw = payload.get("person[linkedin_url]", "")
-                        em_raw = payload.get("person[email]", "")
-                        db.upsert(
-                            new_id,
-                            li_raw,
-                            em_raw,
-                            updated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                        )
-
-                    writer.writerow({
-                        "action": "CREATE",
-                        "person_id": new_id or "",
-                        "name": name,
-                        "match": match or "none",
-                        "linkedin_norm": linkedin_norm,
-                        "email": email,
-                        "detail": "",
-                    })
-                    print(f"[{idx}/{total_rows}] CREATED {name} (person_id={new_id})")
-                    time.sleep(0.2)
-
-            except Exception as e:
-                errors += 1
-                writer.writerow({
-                    "action": "ERROR",
-                    "person_id": person_id or "",
-                    "name": name,
-                    "match": match or "none",
-                    "linkedin_norm": linkedin_norm,
-                    "email": email,
-                    "detail": str(e)[:1500],
-                })
-                print(f"[{idx}/{total_rows}] ERROR {name} - {str(e)[:200]}")
-
-    print("DONE")
-    print(f"Created: {created} | Updated: {updated} | Skipped: {skipped} | Errors: {errors}")
-    print(f"Log: {args.log}")
-    print(f"DB: {args.db}")
-
-
-# ---------------------------
-# Webhook server
-# ---------------------------
-
-def verify_signature_if_possible(payload_data: Dict[str, Any], secret: str) -> bool:
-    if not secret:
-        return True
-
-    sig = str(payload_data.get("signature") or "")
-    if not sig:
-        return False
-
-    data_copy = dict(payload_data)
-    data_copy.pop("signature", None)
-    msg = json.dumps(data_copy, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    mac = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(mac, sig)
-
-
-def run_webhook_server(args):
-    try:
-        from fastapi import FastAPI, Request, Response
-        import uvicorn
-    except Exception:
-        print("Missing deps for webhook server. Install:")
-        print("  pip install fastapi uvicorn")
-        sys.exit(2)
-
-    token = os.environ.get("LOXO_API_TOKEN", "").strip()
-    agency_slug = os.environ.get("LOXO_AGENCY_SLUG", "").strip()
-    base_domain = os.environ.get("LOXO_BASE_DOMAIN", "app.loxo.co").strip()
-    secret = os.environ.get("LOXO_WEBHOOK_SECRET", "").strip()
-
-    if not token or not agency_slug:
-        raise RuntimeError("Set LOXO_API_TOKEN and LOXO_AGENCY_SLUG env vars for webhook-server")
-
-    db = IndexDB(args.db)
-    client = LoxoClient(agency_slug, token, base_domain=base_domain)
-
-    app = FastAPI()
-
-    @app.post("/webhooks/loxo")
-    async def loxo_webhook(request: Request):
-        raw = await request.body()
-        try:
-            payload = json.loads(raw.decode("utf-8", errors="replace"))
-        except Exception:
-            return Response(status_code=200, content="ok")
-
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            return Response(status_code=200, content="ok")
-
-        if secret and not verify_signature_if_possible(data, secret):
-            with open("loxo_webhook_bad_signature.log", "a", encoding="utf-8") as f:
-                f.write(raw.decode("utf-8", errors="replace") + "\n")
-            return Response(status_code=200, content="ok")
-
-        item_type = str(data.get("item_type") or "")
-        action = str(data.get("action") or "")
-        item_id = data.get("item_id")
-
-        with open("loxo_webhook_events.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": time.time(), "data": data}) + "\n")
-
-        if item_type != "person":
-            return Response(status_code=200, content="ok")
-
-        try:
-            pid = int(item_id)
-        except Exception:
-            return Response(status_code=200, content="ok")
-
-        try:
-            if action == "destroy":
-                db.delete(pid)
-            elif action in ("create", "update"):
-                person = client.get_person(pid)
-                li = str(person.get("linkedin_url") or "")
-                em = str(person.get("email") or person.get("email_address") or "")
-                upd = str(person.get("updated_at") or data.get("timestamp") or "")
-                db.upsert(pid, li, em, updated_at=upd)
-        except Exception as e:
-            with open("loxo_webhook_errors.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps({"pid": pid, "action": action, "err": str(e)}) + "\n")
-
-        return Response(status_code=200, content="ok")
-
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    print(f"\nDONE backfill: {rows} people indexed ({rate:.0f}/sec)")
 
 
 # ---------------------------
@@ -750,52 +259,43 @@ def run_webhook_server(args):
 # ---------------------------
 
 def main():
-    p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_init = sub.add_parser("init-db", help="Initialize SQLite index DB")
+    parser = argparse.ArgumentParser()
+
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init-db")
     p_init.add_argument("--db", default="loxo_index.sqlite")
 
-    p_backfill = sub.add_parser("backfill-csv", help="Backfill SQLite index from Loxo CSV export")
+    p_backfill = sub.add_parser("backfill-csv")
+
     p_backfill.add_argument("--db", default="loxo_index.sqlite")
-    p_backfill.add_argument("--csv", required=True, help="Path to exported CSV from Loxo")
-    p_backfill.add_argument("--id-col", default="id", help="Column name for person id in CSV")
-    p_backfill.add_argument("--linkedin-col", default="linkedin_url", help="Column name for linkedin url in CSV")
-    p_backfill.add_argument("--email-col", default="email", help="Column name for email in CSV")
-    p_backfill.add_argument("--list-cols", action="store_true", help="Print CSV columns and exit")
 
-    p_import = sub.add_parser("import", help="Import file into Loxo using local DB index (no full fetch)")
-    p_import.add_argument("--input", required=True, help="XLSX/CSV of candidates to upload")
-    p_import.add_argument("--agency-slug", required=True)
-    p_import.add_argument("--db", default="loxo_index.sqlite")
-    p_import.add_argument("--base-domain", default="app.loxo.co")
-    p_import.add_argument("--dry-run", action="store_true")
-    p_import.add_argument("--log", default="loxo_upsert_log.csv")
+    p_backfill.add_argument("--csv", required=True)
 
-    p_web = sub.add_parser("webhook-server", help="Run webhook receiver to keep DB fresh")
-    p_web.add_argument("--db", default="loxo_index.sqlite")
-    p_web.add_argument("--host", default="0.0.0.0")
-    p_web.add_argument("--port", type=int, default=8000)
+    p_backfill.add_argument("--id-col", default="Id")
 
-    args = p.parse_args()
+    p_backfill.add_argument("--linkedin-col", default="LinkedIN")
+
+    p_backfill.add_argument("--list-cols", action="store_true")
+
+    args = parser.parse_args()
 
     if args.cmd == "init-db":
+
         IndexDB(args.db)
+
         print(f"[OK] initialized {args.db}")
+
         return
 
     if args.cmd == "backfill-csv":
+
         db = IndexDB(args.db)
-        backfill_from_csv(db, args.csv, args.id_col, args.linkedin_col, args.email_col, list_cols=args.list_cols)
-        return
 
-    if args.cmd == "import":
-        run_import(args)
-        return
+        backfill_from_csv(db, args.csv, args.id_col, args.linkedin_col, args.list_cols)
 
-    if args.cmd == "webhook-server":
-        run_webhook_server(args)
-        return
+        db.close()
 
 
 if __name__ == "__main__":
