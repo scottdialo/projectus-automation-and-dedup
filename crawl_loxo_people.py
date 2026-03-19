@@ -39,6 +39,89 @@ def norm_linkedin(url):
     return url
 
 
+def clean_text(v):
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def extract_primary_email(p):
+    emails = p.get("emails")
+    if isinstance(emails, list):
+        for item in emails:
+            if isinstance(item, dict):
+                v = norm_email(item.get("value"))
+                if v:
+                    return v
+
+    return norm_email(p.get("email") or p.get("email_address"))
+
+
+def extract_company(p):
+    # Main field actually present in the Loxo API payload
+    company = clean_text(p.get("current_company"))
+    if company:
+        return company
+
+    # Fallbacks for older / alternate payloads
+    company = clean_text(p.get("company"))
+    if company:
+        return company
+
+    job_profiles = p.get("job_profiles")
+    if isinstance(job_profiles, list):
+        for jp in job_profiles:
+            if not isinstance(jp, dict):
+                continue
+
+            company_obj = jp.get("company")
+            if isinstance(company_obj, dict):
+                name = clean_text(company_obj.get("name"))
+                if name:
+                    return name
+
+            name = clean_text(jp.get("company"))
+            if name:
+                return name
+
+    return ""
+
+
+def extract_job_title(p):
+    # Main field actually present in the Loxo API payload
+    title = clean_text(p.get("current_title"))
+    if title:
+        return title
+
+    # Fallbacks for older / alternate payloads
+    title = clean_text(p.get("title"))
+    if title:
+        return title
+
+    job_profiles = p.get("job_profiles")
+    if isinstance(job_profiles, list):
+        for jp in job_profiles:
+            if isinstance(jp, dict):
+                title = clean_text(jp.get("title"))
+                if title:
+                    return title
+
+    return ""
+
+
+def extract_location(p):
+    location = clean_text(p.get("location"))
+    if location:
+        return location
+
+    city = clean_text(p.get("city"))
+    state = clean_text(p.get("state"))
+    country = clean_text(p.get("country"))
+
+    parts = [x for x in (city, state, country) if x]
+    return ", ".join(parts)
+
+
 def connect_db():
     conn = sqlite3.connect(DB)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -50,22 +133,56 @@ def connect_db():
     CREATE TABLE IF NOT EXISTS people_index (
         person_id INTEGER PRIMARY KEY,
         linkedin_norm TEXT,
-        email_norm TEXT
+        email_norm TEXT,
+        full_name TEXT,
+        company_name TEXT,
+        candidate_location TEXT,
+        job_title TEXT
     )
     """)
+
+    existing_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(people_index)").fetchall()
+    }
+
+    wanted_cols = {
+        "full_name": "TEXT",
+        "company_name": "TEXT",
+        "candidate_location": "TEXT",
+        "job_title": "TEXT",
+    }
+
+    for col, col_type in wanted_cols.items():
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE people_index ADD COLUMN {col} {col_type}")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_li ON people_index(linkedin_norm)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_em ON people_index(email_norm)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_name_company ON people_index(full_name, company_name)")
+
     return conn
 
 
 def bulk_upsert(conn, rows):
     conn.executemany(
         """
-        INSERT INTO people_index(person_id, linkedin_norm, email_norm)
-        VALUES (?, ?, ?)
+        INSERT INTO people_index(
+            person_id,
+            linkedin_norm,
+            email_norm,
+            full_name,
+            company_name,
+            candidate_location,
+            job_title
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(person_id) DO UPDATE SET
             linkedin_norm=excluded.linkedin_norm,
-            email_norm=excluded.email_norm
+            email_norm=excluded.email_norm,
+            full_name=excluded.full_name,
+            company_name=excluded.company_name,
+            candidate_location=excluded.candidate_location,
+            job_title=excluded.job_title
         """,
         rows,
     )
@@ -158,10 +275,22 @@ def main():
             if not pid:
                 continue
 
+            full_name = clean_text(p.get("name"))
             li = norm_linkedin(p.get("linkedin_url"))
-            em = norm_email(p.get("email"))
+            em = extract_primary_email(p)
+            company_name = extract_company(p)
+            candidate_location = extract_location(p)
+            job_title = extract_job_title(p)
 
-            batch.append((pid, li, em))
+            batch.append((
+                pid,
+                li,
+                em,
+                full_name,
+                company_name,
+                candidate_location,
+                job_title,
+            ))
             total += 1
 
         if len(batch) >= 2000:
