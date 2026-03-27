@@ -5,7 +5,7 @@ import os
 import re
 import sqlite3
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import pandas as pd
 import requests
@@ -33,6 +33,60 @@ def norm_linkedin(url: str) -> str:
         return ""
     u = u.split("?")[0].rstrip("/")
     return u
+
+
+def split_multi_value(value: Any) -> List[str]:
+    """
+    Convert a stored therapy/device value into a normalized list.
+
+    Handles:
+    - comma-separated strings
+    - semicolon-separated strings
+    - pipe-separated strings
+    - lists
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return []
+        raw_items = re.split(r"[;,|]", text)
+
+    cleaned: List[str] = []
+    seen = set()
+
+    for item in raw_items:
+        s = str(item).strip()
+        if not s:
+            continue
+        key = s.casefold()
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(s)
+
+    return cleaned
+
+
+def merge_multi_value(existing: Any, new_value: Any) -> str:
+    """
+    Append new therapy/device values to existing ones without duplicates.
+    Returns a comma-separated string suitable for person[custom_text_1].
+    """
+    existing_items = split_multi_value(existing)
+    new_items = split_multi_value(new_value)
+
+    seen = {item.casefold() for item in existing_items}
+    for item in new_items:
+        key = item.casefold()
+        if key not in seen:
+            existing_items.append(item)
+            seen.add(key)
+
+    return ", ".join(existing_items)
 
 
 class IndexDB:
@@ -78,7 +132,10 @@ class IndexDB:
         li = norm_linkedin(linkedin_url)
         em = norm_email(email)
 
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(people_index)").fetchall()}
+        cols = {
+            r[1]
+            for r in self.conn.execute("PRAGMA table_info(people_index)").fetchall()
+        }
 
         if "person_id" not in cols:
             raise RuntimeError("people_index table missing person_id")
@@ -131,15 +188,24 @@ class LoxoClient:
     def __init__(self, agency_slug: str, token: str, base_domain: str = "app.loxo.co"):
         self.base_people = f"https://{base_domain}/api/{agency_slug}/people"
         self.session = requests.Session()
-        self.session.headers.update({
-            "accept": "application/json",
-            "authorization": f"Bearer {token}",
-        })
+        self.session.headers.update(
+            {
+                "accept": "application/json",
+                "authorization": f"Bearer {token}",
+            }
+        )
 
     def create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         r = self.session.post(self.base_people, data=payload, timeout=60)
         if r.status_code >= 400:
             raise RuntimeError(f"POST /people failed {r.status_code}: {r.text}")
+        return r.json() if r.content else {}
+
+    def get_person(self, person_id: int) -> Dict[str, Any]:
+        url = f"{self.base_people}/{person_id}"
+        r = self.session.get(url, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"GET /people/{person_id} failed {r.status_code}: {r.text}")
         return r.json() if r.content else {}
 
     def update(self, person_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -150,6 +216,75 @@ class LoxoClient:
         if r.status_code >= 400:
             raise RuntimeError(f"UPDATE /people/{person_id} failed {r.status_code}: {r.text}")
         return r.json() if r.content else {}
+
+    def get_current_therapy(self, person_id: int) -> str:
+        """
+        Best-effort extraction of custom_text_1 from a Loxo person response.
+        Tries several likely shapes because API responses can vary.
+        """
+        resp = self.get_person(person_id)
+
+        candidate_objects: List[Dict[str, Any]] = []
+        if isinstance(resp, dict):
+            candidate_objects.append(resp)
+
+            person_obj = resp.get("person")
+            if isinstance(person_obj, dict):
+                candidate_objects.append(person_obj)
+
+            data_obj = resp.get("data")
+            if isinstance(data_obj, dict):
+                candidate_objects.append(data_obj)
+
+        direct_keys = [
+            "custom_text_1",
+            "person[custom_text_1]",
+            "therapy",
+            "Therapy/Device",
+        ]
+
+        for obj in candidate_objects:
+            for key in direct_keys:
+                if key in obj and obj.get(key) not in (None, ""):
+                    return str(obj.get(key)).strip()
+
+        for obj in candidate_objects:
+            custom = obj.get("custom_fields")
+            if isinstance(custom, dict):
+                for key in ("custom_text_1", "person[custom_text_1]", "Therapy/Device"):
+                    if key in custom and custom.get(key) not in (None, ""):
+                        return str(custom.get(key)).strip()
+
+        for obj in candidate_objects:
+            fields = obj.get("customs") or obj.get("custom_fields_attributes") or obj.get("fields")
+            if isinstance(fields, list):
+                for field in fields:
+                    if not isinstance(field, dict):
+                        continue
+
+                    possible_names = [
+                        str(field.get("name", "")).strip(),
+                        str(field.get("key", "")).strip(),
+                        str(field.get("slug", "")).strip(),
+                        str(field.get("label", "")).strip(),
+                    ]
+                    possible_value = (
+                        field.get("value")
+                        or field.get("text")
+                        or field.get("field_value")
+                        or field.get("answer")
+                    )
+
+                    normalized_names = {name.casefold() for name in possible_names if name}
+                    if (
+                        "custom_text_1" in normalized_names
+                        or "therapy/device" in normalized_names
+                        or "therapy" in normalized_names
+                    ):
+                        if possible_value not in (None, ""):
+                            return str(possible_value).strip()
+
+        return ""
 
 
 def parse_person_id_from_response(resp: Dict[str, Any]) -> Optional[int]:
@@ -174,7 +309,13 @@ def load_file(path: str) -> pd.DataFrame:
     else:
         df = pd.read_excel(path, dtype=str).fillna("")
 
-    required = ["full_name", "Email Address", "LinkedIn Contact Profile URL", "Therapy/Device"]
+    # These columns must be included in the excel / csv file to avoid error
+    required = [
+        "full_name",
+        "Email Address",
+        "LinkedIn Contact Profile URL",
+        "Therapy/Device",
+    ]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise RuntimeError(f"Missing columns: {missing}\nFound: {list(df.columns)}")
@@ -214,11 +355,17 @@ def build_create_payload(row: pd.Series) -> Dict[str, Any]:
     return payload
 
 
-def build_update_payload(row: pd.Series) -> Dict[str, Any]:
+def build_update_payload(row: pd.Series, current_therapy: str) -> Dict[str, Any]:
     payload: Dict[str, Any] = {}
-    therapy = str(row.get("Therapy/Device", "")).strip()
-    if therapy:
-        payload["person[custom_text_1]"] = therapy
+
+    new_therapy = str(row.get("Therapy/Device", "")).strip()
+    if not new_therapy:
+        return payload
+
+    merged_therapy = merge_multi_value(current_therapy, new_therapy)
+    if merged_therapy:
+        payload["person[custom_text_1]"] = merged_therapy
+
     return payload
 
 
@@ -281,18 +428,31 @@ def main():
         try:
             if args.dry_run:
                 if matched_person_id:
+                    print(f"[{idx}/{total_rows}] WOULD FETCH existing therapy for {full_name}")
+                    print(f"[{idx}/{total_rows}] WOULD MERGE new therapy='{therapy}' into existing value")
                     updated += 1
-                    print(f"[{idx}/{total_rows}] UPDATE {full_name} via {match_type} -> therapy={therapy}")
+                    print(f"[{idx}/{total_rows}] UPDATE {full_name} via {match_type}")
                 else:
                     created += 1
                     print(f"[{idx}/{total_rows}] CREATE {full_name} -> therapy={therapy}")
                 continue
 
             if matched_person_id:
-                payload = build_update_payload(row)
+                current_therapy = client.get_current_therapy(matched_person_id)
+                payload = build_update_payload(row, current_therapy)
+
+                if not payload:
+                    skipped += 1
+                    print(f"[{idx}/{total_rows}] SKIP {full_name} (empty update payload)")
+                    continue
+
                 client.update(matched_person_id, payload)
                 updated += 1
-                print(f"[{idx}/{total_rows}] UPDATED {full_name} via {match_type} (person_id={matched_person_id})")
+                print(
+                    f"[{idx}/{total_rows}] UPDATED {full_name} via {match_type} "
+                    f"(person_id={matched_person_id}) "
+                    f"| old='{current_therapy}' | new='{payload['person[custom_text_1]']}'"
+                )
             else:
                 payload = build_create_payload(row)
                 resp = client.create(payload)
@@ -306,7 +466,7 @@ def main():
 
         except Exception as e:
             errors += 1
-            print(f"[{idx}/{total_rows}] ERROR {full_name} - {str(e)[:200]}")
+            print(f"[{idx}/{total_rows}] ERROR {full_name} - {str(e)[:500]}")
 
     db.close()
 
